@@ -1,0 +1,27 @@
+[Unit]
+Description=Standalone Hai-IP PPTP client
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+EnvironmentFile=/etc/haiip/client.env
+ExecStart=/usr/local/bin/haiip connect --server hai-ip4.haion.net --username-env HAIIP_USERNAME --password-env HAIIP_PASSWORD --tun-name haiip0 --mtu 1400
+Restart=on-failure
+RestartSec=60s
+TimeoutStopSec=10s
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

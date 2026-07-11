@@ -1,0 +1,4 @@
+server = "hai-ip4.haion.net"
+port = 1723
+# username과 password는 이 파일에 기록하지 않습니다. 실행 시 직접 입력하거나
+# 서버의 root 전용 환경 파일에서 HAIIP_USERNAME / HAIIP_PASSWORD로 제공합니다.

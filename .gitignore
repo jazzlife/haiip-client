@@ -1,0 +1,12 @@
+/target/
+*.pcap
+config/haiip.toml
+client.env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
