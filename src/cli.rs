@@ -4,6 +4,8 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
+use rand::seq::SliceRandom;
+use tracing::{info, warn};
 
 use crate::{
     error::{Error, Result},
@@ -12,7 +14,12 @@ use crate::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "haiip", version, about = "Standalone Hai-IP PPTP client")]
+#[command(
+    name = "haiip",
+    version,
+    about = "Hai-IP용 순수 Rust PPTP 클라이언트",
+    long_about = "pppd, pptp-linux, NetworkManager 없이 PPTP 제어, GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리하는 Hai-IP 클라이언트입니다.\n\n기본 연결은 사용자명과 숨김 비밀번호를 직접 입력받습니다. systemd 서비스는 /etc/haiip/client.env의 root 전용 환경 변수만 사용합니다."
+)]
 pub struct Cli {
     #[arg(long, global = true, default_value = "info", env = "RUST_LOG")]
     pub log_level: String,
@@ -24,7 +31,7 @@ pub struct Cli {
 pub enum Command {
     /// Open TCP/1723 and complete the PPTP Start-Control exchange.
     Connect {
-        #[arg(long, default_value = "haiip2.haion.net")]
+        #[arg(long, default_value = "auto")]
         server: String,
         #[arg(long, default_value_t = 1723)]
         port: u16,
@@ -53,6 +60,8 @@ pub enum Command {
     RouteStatus,
     /// Print packet capture guidance.
     CaptureInfo,
+    /// Show client capabilities and credential handling.
+    About,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -68,32 +77,57 @@ pub async fn run(cli: Cli) -> Result<()> {
             mtu,
             control_only,
         } => {
+            let servers = selected_servers(&server);
             if control_only {
-                let established = establish(&ControlConnectOptions {
-                    server,
-                    port,
-                    timeout: Duration::from_secs(timeout_seconds),
-                })
-                .await?;
-                println!(
-                    "PPTP control established: peer={}, version=0x{:04x}, firmware={}",
-                    established.peer,
-                    established.server.protocol_version,
-                    established.server.firmware_revision
-                );
-                Ok(())
+                let mut last_error = None;
+                for server in servers {
+                    match establish(&ControlConnectOptions {
+                        server: server.clone(),
+                        port,
+                        timeout: Duration::from_secs(timeout_seconds),
+                    })
+                    .await
+                    {
+                        Ok(established) => {
+                            println!(
+                                "PPTP control established: peer={}, version=0x{:04x}, firmware={}",
+                                established.peer,
+                                established.server.protocol_version,
+                                established.server.firmware_revision
+                            );
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            warn!(%server, %error, "PPTP control server unavailable; trying next candidate");
+                            last_error = Some(error);
+                        }
+                    }
+                }
+                Err(last_error.expect("server candidate list is never empty"))
             } else {
                 let username = resolve_username(username, username_env)?;
                 let password = resolve_password(password_env)?;
-                session::connect(SessionOptions {
-                    server,
-                    port,
-                    username,
-                    password,
-                    tun_name,
-                    mtu,
-                })
-                .await
+                let mut last_error = None;
+                for server in servers {
+                    info!(%server, "attempting Hai-IP connection");
+                    match session::connect(SessionOptions {
+                        server: server.clone(),
+                        port,
+                        username: username.clone(),
+                        password: password.clone(),
+                        tun_name: tun_name.clone(),
+                        mtu,
+                    })
+                    .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            warn!(%server, %error, "Hai-IP server attempt failed; trying next candidate");
+                            last_error = Some(error);
+                        }
+                    }
+                }
+                Err(last_error.expect("server candidate list is never empty"))
             }
         }
         Command::Inspect => {
@@ -106,10 +140,27 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("sudo tcpdump -ni any -w haiip.pcap 'tcp port 1723 or proto 47'");
             Ok(())
         }
+        Command::About => {
+            println!(
+                "Hai-IP Client\n\npppd, pptp-linux, NetworkManager 없이 PPTP/GRE/PPP/MS-CHAPv2/IPCP/TUN을 직접 처리합니다.\n\n기본 서버 값은 auto이며 hai-ip1부터 hai-ip8까지를 무작위 순서로 시도해 실제 연결되는 서버를 선택합니다. 일반 연결은 사용자명과 숨김 비밀번호를 직접 입력받습니다. systemd 서비스는 /etc/haiip/client.env의 root 전용 환경 변수만 사용하며, 인증 정보는 저장소에 포함하지 않습니다.\n\n설치: sudo ./scripts/install.sh --username <사용자명> --password <비밀번호>\n삭제: sudo ./scripts/uninstall.sh"
+            );
+            Ok(())
+        }
         Command::Disconnect => Err(Error::NotImplemented("disconnect supervisor")),
         Command::Status => Err(Error::NotImplemented("status supervisor")),
         Command::RouteStatus => Err(Error::NotImplemented("route management")),
     }
+}
+
+fn selected_servers(server: &str) -> Vec<String> {
+    if server != "auto" {
+        return vec![server.to_owned()];
+    }
+    let mut servers = (1..=8)
+        .map(|index| format!("hai-ip{index}.haion.net"))
+        .collect::<Vec<_>>();
+    servers.shuffle(&mut rand::thread_rng());
+    servers
 }
 
 fn resolve_username(username: Option<String>, username_env: Option<String>) -> Result<String> {
@@ -144,4 +195,26 @@ fn prompt(label: &str) -> Result<String> {
         return Err(Error::Ppp("사용자명은 비어 있을 수 없습니다".into()));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_servers;
+
+    #[test]
+    fn auto_server_selection_contains_every_hai_ip_host_once() {
+        let mut servers = selected_servers("auto");
+        servers.sort();
+        assert_eq!(
+            servers,
+            (1..=8)
+                .map(|index| format!("hai-ip{index}.haion.net"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn explicit_server_selection_does_not_change_the_target() {
+        assert_eq!(selected_servers("vpn.example.test"), ["vpn.example.test"]);
+    }
 }

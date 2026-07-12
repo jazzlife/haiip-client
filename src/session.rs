@@ -61,7 +61,7 @@ pub async fn connect(options: SessionOptions) -> Result<()> {
         std::net::IpAddr::V4(address) => address,
         _ => return Err(Error::Gre("PPTP peer resolved to IPv6".into())),
     };
-    let control_task = tokio::spawn(control::maintain(call.stream));
+    let mut control_task = tokio::spawn(control::maintain(call.stream));
     let gre = GreSocket::open(peer_ip)?;
     let mut gre_state = GreState::new();
     let mut machine = Machine::new(options.username, options.password);
@@ -131,14 +131,29 @@ pub async fn connect(options: SessionOptions) -> Result<()> {
         }
     };
 
-    let (local, remote) = tokio::select! {
-        result = timeout(Duration::from_secs(30), negotiation) => result.map_err(|_| Error::Timeout(30))??,
-        result = control_task => return result.map_err(|error| Error::Ppp(format!("control task failed: {error}")))?,
+    let negotiated = tokio::select! {
+        result = timeout(Duration::from_secs(30), negotiation) => match result {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout(30)),
+        },
+        result = &mut control_task => match result {
+            Ok(Ok(())) => Err(Error::Ppp("PPTP control task ended unexpectedly".into())),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(Error::Ppp(format!("control task failed: {error}"))),
+        },
+    };
+    let (local, remote) = match negotiated {
+        Ok(connected) => connected,
+        Err(error) => {
+            control_task.abort();
+            let _ = control_task.await;
+            return Err(error);
+        }
     };
     info!(%local, peer = %remote, "IPCP opened");
     let tun = TunDevice::create(&options.tun_name, local, remote, options.mtu)?;
     info!(interface = %tun.name, "Hai-IP tunnel connected");
-    pump(
+    let result = pump(
         gre,
         call.peer_call_id,
         call.local_call_id,
@@ -147,7 +162,10 @@ pub async fn connect(options: SessionOptions) -> Result<()> {
         machine,
         tun,
     )
-    .await
+    .await;
+    control_task.abort();
+    let _ = control_task.await;
+    result
 }
 
 async fn process_ppp(

@@ -20,31 +20,35 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ```bash
 cargo run -- connect --server hai-ip4.haion.net --port 1723 --control-only
-sudo cargo run -- connect --server hai-ip4.haion.net
+sudo cargo run -- connect
 cargo run -- inspect
 cargo run -- capture-info
 ```
 
-## systemd 서비스 등록
+## 한 단계 설치와 삭제
 
-인증 정보는 서버의 root 전용 환경 파일에만 직접 입력합니다. 저장소에는 빈 예제만 포함되며 실제 환경 파일은 Git 추적 대상이 아닙니다.
+Rust stable이 설치된 Linux에서 아래 한 명령으로 빌드·환경 파일 생성·서비스 등록·시작이 끝납니다.
 
 ```bash
-sudo install -d -m 700 /etc/haiip
-sudo install -o root -g root -m 600 systemd/client.env.example /etc/haiip/client.env
-sudoedit /etc/haiip/client.env
-# HAIIP_USERNAME=여기에_사용자명_입력
-# HAIIP_PASSWORD=여기에_비밀번호_입력
-
-sudo install -o root -g root -m 644 systemd/haiip-client.service /etc/systemd/system/haiip-client.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now haiip-client.service
+sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>'
 ```
 
-제공된 unit은 `HAIIP_USERNAME`과 `HAIIP_PASSWORD`를 `/etc/haiip/client.env`에서만 읽고, 실패 시 60초 뒤 재접속합니다. capability 범위는 네트워크 관리와 raw socket으로 제한합니다.
+기본값은 `auto`이며 연결 가능한 Hai-IP 서버를 자동 선택합니다. 특정 서버를 지정하려면 다음처럼 실행합니다.
+
+```bash
+sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>' --server hai-ip4.haion.net
+```
+
+삭제는 한 명령입니다.
+
+```bash
+sudo ./scripts/uninstall.sh
+```
+
+설치 스크립트는 사용자명·비밀번호·서버를 `/etc/haiip/client.env`에만 기록하고 `root:root`, `0600` 권한을 적용합니다. 이 파일은 Git에 포함되지 않습니다. 제공된 unit은 이 환경 파일에서만 계정을 읽고, 실패 시 60초 뒤 재접속합니다.
 
 ## 보안 주의
 
 PPTP 및 MS-CHAPv2는 현대적인 VPN 프로토콜보다 보안상 약합니다. 이 프로젝트는 Hai-IP 호환 목적이며 신뢰할 수 없는 네트워크를 위한 범용 신규 설계로 권장하지 않습니다. 인증 정보와 패킷 캡처를 저장소에 커밋하지 마십시오.
 
-설계 근거와 구현 범위는 [프로토콜 흐름](docs/protocol-flow.md), [패킷 형식](docs/packet-formats.md)을 참고하십시오.
+`haiip about`에서 기능과 계정 처리 방식을 확인할 수 있습니다. 설계 근거와 구현 범위는 [프로토콜 흐름](docs/protocol-flow.md), [패킷 형식](docs/packet-formats.md)을 참고하십시오.

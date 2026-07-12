@@ -8,7 +8,7 @@ StartLimitIntervalSec=0
 Type=simple
 Environment=RUST_LOG=info
 EnvironmentFile=/etc/haiip/client.env
-ExecStart=/usr/local/bin/haiip connect --server hai-ip4.haion.net --username-env HAIIP_USERNAME --password-env HAIIP_PASSWORD --tun-name haiip0 --mtu 1400
+ExecStart=/usr/local/bin/haiip connect --server ${HAIIP_SERVER} --username-env HAIIP_USERNAME --password-env HAIIP_PASSWORD --tun-name haiip0 --mtu 1400
 Restart=on-failure
 RestartSec=60s
 TimeoutStopSec=10s
