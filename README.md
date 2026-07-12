@@ -1,5 +1,18 @@
 # Hai-IP Client
 
+> [!IMPORTANT]
+> ## 바로 시작
+>
+> ```bash
+> sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>'
+> ```
+>
+> 삭제할 때는 아래 한 명령만 실행합니다.
+>
+> ```bash
+> sudo ./scripts/uninstall.sh
+> ```
+
 기존 `pptp-linux`, `pppd`, NetworkManager를 실행하지 않고 PPTP/PPP를 직접 처리하는 Linux용 Rust 클라이언트입니다.
 
 현재 PPTP 제어 연결, Enhanced GRE, LCP, MS-CHAPv2 상호 인증, IPCP, Linux TUN 및 양방향 LCP keepalive를 직접 구현합니다. Hai-IP의 GRE 초기 패킷 손실과 서버 생존 확인 방식에 맞춘 호환 계층을 포함합니다. 기본 경로 변경은 아직 수행하지 않으며 `haiip0` point-to-point 인터페이스만 구성합니다.
