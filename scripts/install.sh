@@ -9,7 +9,7 @@ readonly BINARY_FILE='/usr/local/bin/haiip'
 
 usage() {
   cat <<'EOF'
-사용법: sudo ./scripts/install.sh --username <사용자명> --password <비밀번호> [--server auto|hai-ip1.haion.net]
+사용법: sudo ./scripts/install.sh --username <아이디@VPN번호> --password <비밀번호> [--server auto|hai-ip1.haion.net]
 EOF
 }
 

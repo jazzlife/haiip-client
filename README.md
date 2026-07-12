@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > ```bash
-> sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>'
+> sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>'
 > sudo ./scripts/uninstall.sh
 > ```
 
@@ -30,7 +30,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## 실행
 
-전체 연결에는 raw GRE와 TUN을 위한 `CAP_NET_RAW`, `CAP_NET_ADMIN` 권한이 필요합니다. 대화형 실행은 사용자명과 숨김 비밀번호를 직접 입력받습니다.
+전체 연결에는 raw GRE와 TUN을 위한 `CAP_NET_RAW`, `CAP_NET_ADMIN` 권한이 필요합니다. 사용자명은 Hai-IP **아이디와 VPN 번호를 `아이디@VPN번호` 형식으로 결합한 값**입니다. 대화형 실행은 이 사용자명과 숨김 비밀번호를 직접 입력받습니다.
 
 ```bash
 cargo run -- connect --server hai-ip4.haion.net --port 1723 --control-only
@@ -45,13 +45,13 @@ haiip about
 Rust stable이 설치된 Linux에서 아래 한 명령으로 빌드·환경 파일 생성·서비스 등록·시작이 끝납니다.
 
 ```bash
-sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>'
+sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>'
 ```
 
 기본값은 `auto`이며 연결 가능한 Hai-IP 서버를 자동 선택합니다. 특정 서버를 지정하려면 다음처럼 실행합니다.
 
 ```bash
-sudo ./scripts/install.sh --username '<사용자명>' --password '<비밀번호>' --server hai-ip4.haion.net
+sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>' --server hai-ip4.haion.net
 ```
 
 삭제는 한 명령입니다.

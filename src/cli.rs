@@ -37,7 +37,11 @@ pub enum Command {
         port: u16,
         #[arg(long, default_value_t = 15)]
         timeout_seconds: u64,
-        #[arg(long, conflicts_with = "username_env")]
+        #[arg(
+            long,
+            conflicts_with = "username_env",
+            help = "Hai-IP 아이디와 VPN 번호를 결합한 사용자명 (예: user@1)"
+        )]
         username: Option<String>,
         #[arg(long, conflicts_with = "username")]
         username_env: Option<String>,
