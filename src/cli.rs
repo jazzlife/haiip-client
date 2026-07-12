@@ -17,8 +17,8 @@ use crate::{
 #[command(
     name = "haiip",
     version,
-    about = "Hai-IP용 순수 Rust PPTP 클라이언트",
-    long_about = "pppd, pptp-linux, NetworkManager 없이 PPTP 제어, GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리하는 Hai-IP 클라이언트입니다.\n\n기본 연결은 사용자명과 숨김 비밀번호를 직접 입력받습니다. systemd 서비스는 /etc/haiip/client.env의 root 전용 환경 변수만 사용합니다."
+    about = "독립형 Rust Hai-IP PPTP 클라이언트",
+    long_about = "PPTP 제어, Enhanced GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리하는 Hai-IP 클라이언트입니다. 기본 auto 모드는 Hai-IP 서버 풀에서 연결 가능한 엔드포인트를 선택합니다."
 )]
 pub struct Cli {
     #[arg(long, global = true, default_value = "info", env = "RUST_LOG")]
@@ -142,7 +142,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::About => {
             println!(
-                "Hai-IP Client\n\npppd, pptp-linux, NetworkManager 없이 PPTP/GRE/PPP/MS-CHAPv2/IPCP/TUN을 직접 처리합니다.\n\n기본 서버 값은 auto이며 hai-ip1부터 hai-ip8까지를 무작위 순서로 시도해 실제 연결되는 서버를 선택합니다. 일반 연결은 사용자명과 숨김 비밀번호를 직접 입력받습니다. systemd 서비스는 /etc/haiip/client.env의 root 전용 환경 변수만 사용하며, 인증 정보는 저장소에 포함하지 않습니다.\n\n설치: sudo ./scripts/install.sh --username <사용자명> --password <비밀번호>\n삭제: sudo ./scripts/uninstall.sh"
+                "Hai-IP Client — 독립형 Rust PPTP 구현\n\nPPTP 제어, Enhanced GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리합니다. 기본 auto 모드는 Hai-IP 서버 풀에서 연결 가능한 엔드포인트를 선택하며, 서비스 인증 정보는 root 전용 환경 파일에서만 읽습니다.\n\n설치  sudo ./scripts/install.sh --username <사용자명> --password <비밀번호>\n삭제  sudo ./scripts/uninstall.sh"
             );
             Ok(())
         }
