@@ -32,6 +32,13 @@ struct GreState {
     reorder: BTreeMap<u32, Vec<u8>>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ReceiveSequence {
+    InOrder,
+    Gap { expected: u32 },
+    Stale { expected: u32 },
+}
+
 impl GreState {
     fn new() -> Self {
         Self {
@@ -40,6 +47,22 @@ impl GreState {
             last_received: None,
             reorder: BTreeMap::new(),
         }
+    }
+
+    fn receive_sequence(&mut self, sequence: u32) -> ReceiveSequence {
+        let disposition = match self.expected_receive {
+            None => ReceiveSequence::InOrder,
+            Some(expected) if sequence == expected => ReceiveSequence::InOrder,
+            Some(expected) if sequence.wrapping_sub(expected) < (1 << 31) => {
+                ReceiveSequence::Gap { expected }
+            }
+            Some(expected) => ReceiveSequence::Stale { expected },
+        };
+        if !matches!(disposition, ReceiveSequence::Stale { .. }) {
+            self.expected_receive = Some(sequence.wrapping_add(1));
+            self.last_received = Some(sequence);
+        }
+        disposition
     }
 }
 
@@ -87,17 +110,22 @@ pub async fn connect(options: SessionOptions) -> Result<()> {
                 "RX GRE"
             );
             if let Some(sequence) = decoded.sequence {
-                if let Some(expected) = gre_state.expected_receive {
-                    if sequence != expected {
+                match gre_state.receive_sequence(sequence) {
+                    ReceiveSequence::InOrder => {}
+                    ReceiveSequence::Gap { expected } => {
                         warn!(sequence, expected, "GRE gap detected during negotiation; advancing and retransmitting LCP Configure-Request");
                         gre_state.reorder.clear();
-                        gre_state.expected_receive = Some(sequence);
                         send_event(&gre, call.peer_call_id, &mut gre_state, machine.start())
                             .await?;
                     }
+                    ReceiveSequence::Stale { expected } => {
+                        warn!(
+                            sequence,
+                            expected, "dropping stale GRE packet during negotiation"
+                        );
+                        continue;
+                    }
                 }
-                gre_state.expected_receive = Some(sequence.wrapping_add(1));
-                gre_state.last_received = Some(sequence);
                 if let Some(connected) = process_ppp(
                     &gre,
                     call.peer_call_id,
@@ -253,12 +281,16 @@ async fn pump(
                     "RX GRE"
                 );
                 let Some(sequence) = decoded.sequence else { continue; };
-                if state.expected_receive.is_some() && state.expected_receive != Some(sequence) {
-                    warn!(sequence, expected = ?state.expected_receive, "dropping out-of-order GRE packet during pump");
-                    continue;
+                match state.receive_sequence(sequence) {
+                    ReceiveSequence::InOrder => {}
+                    ReceiveSequence::Gap { expected } => {
+                        warn!(sequence, expected, "GRE gap detected during pump; advancing receive sequence");
+                    }
+                    ReceiveSequence::Stale { expected } => {
+                        warn!(sequence, expected, "dropping stale GRE packet during pump");
+                        continue;
+                    }
                 }
-                state.expected_receive = Some(sequence.wrapping_add(1));
-                state.last_received = Some(sequence);
                 let (protocol, payload) = decode_frame(decoded.payload)?;
                 if protocol == IPV4 {
                     if payload.first().is_some_and(|first| first >> 4 == 4) {
@@ -298,5 +330,76 @@ async fn pump(
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = terminate.recv() => return Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GreState, ReceiveSequence};
+
+    #[test]
+    fn receive_gap_advances_instead_of_stalling_the_tunnel() {
+        let mut state = GreState::new();
+
+        assert_eq!(state.receive_sequence(100), ReceiveSequence::InOrder);
+        assert_eq!(
+            state.receive_sequence(103),
+            ReceiveSequence::Gap { expected: 101 }
+        );
+        assert_eq!(state.expected_receive, Some(104));
+        assert_eq!(state.last_received, Some(103));
+    }
+
+    #[test]
+    fn stale_receive_sequence_is_dropped_without_rewinding() {
+        let mut state = GreState::new();
+
+        assert_eq!(state.receive_sequence(100), ReceiveSequence::InOrder);
+        assert_eq!(
+            state.receive_sequence(99),
+            ReceiveSequence::Stale { expected: 101 }
+        );
+        assert_eq!(state.expected_receive, Some(101));
+        assert_eq!(state.last_received, Some(100));
+    }
+
+    #[test]
+    fn receive_sequence_wrap_is_in_order() {
+        let mut state = GreState::new();
+
+        assert_eq!(state.receive_sequence(u32::MAX), ReceiveSequence::InOrder);
+        assert_eq!(state.receive_sequence(0), ReceiveSequence::InOrder);
+        assert_eq!(state.expected_receive, Some(1));
+    }
+
+    #[test]
+    fn receive_gap_across_wrap_advances_and_late_pre_wrap_packet_is_stale() {
+        let mut state = GreState::new();
+
+        assert_eq!(
+            state.receive_sequence(u32::MAX - 2),
+            ReceiveSequence::InOrder
+        );
+        assert_eq!(
+            state.receive_sequence(1),
+            ReceiveSequence::Gap {
+                expected: u32::MAX - 1,
+            }
+        );
+        assert_eq!(
+            state.receive_sequence(u32::MAX),
+            ReceiveSequence::Stale { expected: 2 }
+        );
+    }
+
+    #[test]
+    fn ambiguous_half_range_sequence_is_stale() {
+        let mut state = GreState::new();
+
+        assert_eq!(state.receive_sequence(u32::MAX), ReceiveSequence::InOrder);
+        assert_eq!(
+            state.receive_sequence(1 << 31),
+            ReceiveSequence::Stale { expected: 0 }
+        );
     }
 }

@@ -40,7 +40,7 @@ DNS A 레코드 해석 및 세션 서버 IPv4 고정
 6. 대기 중 PPTP Echo-Request가 오면 동일 Identifier로 성공 Echo-Reply를 즉시 보낸다.
 7. Start-Control-Connection-Reply의 result=1과 version=0x0100을 확인한다.
 
-현재 바이너리는 Outgoing Call, raw Enhanced GRE, LCP, MS-CHAPv2, IPCP와 TUN까지 연결합니다. 비밀번호는 환경 변수에서만 받고 NT Response 및 Challenge를 로그에 남기지 않습니다. 서버 Authenticator Response를 RFC 2759 방식으로 상수 시간 검증한 뒤에만 IPCP를 시작합니다.
+현재 바이너리는 Outgoing Call, raw Enhanced GRE, LCP, MS-CHAPv2, IPCP와 TUN까지 연결합니다. TUN 생성 후에는 할당 주소를 source로 사용하는 트래픽만 전용 테이블을 통해 터널로 보내며 시스템 기본 경로와 PPTP 전송 경로는 유지합니다. 비밀번호는 환경 변수에서만 받고 NT Response 및 Challenge를 로그에 남기지 않습니다. 서버 Authenticator Response를 RFC 2759 방식으로 상수 시간 검증한 뒤에만 IPCP를 시작합니다.
 
 ## Hai-IP 관찰 흐름과 안정화 항목
 

@@ -1,22 +1,28 @@
 use std::{
+    collections::BTreeSet,
     fs::OpenOptions,
     io,
     net::Ipv4Addr,
     os::fd::{AsRawFd, OwnedFd},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use tokio::io::unix::AsyncFd;
+use tracing::warn;
 
 use crate::error::{Error, Result};
 
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const IFF_TUN: libc::c_short = 0x0001;
 const IFF_NO_PI: libc::c_short = 0x1000;
+const ROUTE_TABLE_START: u32 = 20_000;
+const ROUTE_TABLE_END: u32 = 30_000;
 
 pub struct TunDevice {
     fd: AsyncFd<OwnedFd>,
     pub name: String,
+    local: Ipv4Addr,
+    route_policy: RoutePolicy,
 }
 
 impl TunDevice {
@@ -59,9 +65,13 @@ impl TunDevice {
         {
             return Err(io::Error::last_os_error().into());
         }
+        let fd = AsyncFd::new(fd)?;
+        let route_policy = configure_route_policy(local, name)?;
         Ok(Self {
-            fd: AsyncFd::new(fd)?,
+            fd,
             name: name.to_owned(),
+            local,
+            route_policy,
         })
     }
 
@@ -122,9 +132,13 @@ impl TunDevice {
 
 impl Drop for TunDevice {
     fn drop(&mut self) {
-        let _ = Command::new("ip")
+        remove_route_policy(self.local, &self.name, &self.route_policy);
+        let status = Command::new("ip")
             .args(["link", "delete", "dev", &self.name])
             .status();
+        if !status.is_ok_and(|status| status.success()) {
+            warn!(interface = %self.name, "failed to remove TUN interface");
+        }
     }
 }
 
@@ -167,9 +181,147 @@ fn tunnel_address_arguments(local: Ipv4Addr, name: &str) -> Vec<String> {
     ]
 }
 
+struct RoutePolicyArguments {
+    route: Vec<String>,
+    rule: Vec<String>,
+    delete_rule: Vec<String>,
+    delete_route: Vec<String>,
+}
+
+struct RoutePolicy {
+    table: u32,
+}
+
+fn route_policy_arguments(local: Ipv4Addr, name: &str, table: u32) -> RoutePolicyArguments {
+    let source = format!("{local}/32");
+    let table = table.to_string();
+    RoutePolicyArguments {
+        route: vec![
+            "route".into(),
+            "add".into(),
+            "table".into(),
+            table.clone(),
+            "default".into(),
+            "dev".into(),
+            name.into(),
+        ],
+        rule: vec![
+            "rule".into(),
+            "add".into(),
+            "from".into(),
+            source.clone(),
+            "lookup".into(),
+            table.clone(),
+        ],
+        delete_rule: vec![
+            "rule".into(),
+            "del".into(),
+            "from".into(),
+            source,
+            "lookup".into(),
+            table.clone(),
+        ],
+        delete_route: vec![
+            "route".into(),
+            "del".into(),
+            "table".into(),
+            table,
+            "default".into(),
+            "dev".into(),
+            name.into(),
+        ],
+    }
+}
+
+fn configure_route_policy(local: Ipv4Addr, name: &str) -> Result<RoutePolicy> {
+    let mut used = current_route_tables()?;
+    loop {
+        let table = select_route_table(&used).ok_or_else(|| {
+            Error::NetworkConfiguration("no unused route policy table is available".into())
+        })?;
+        let arguments = route_policy_arguments(local, name, table);
+        if let Err(error) = run_ip(&as_strs(&arguments.route)) {
+            let refreshed = current_route_tables()?;
+            if refreshed.contains(&table) {
+                used = refreshed;
+                continue;
+            }
+            return Err(error);
+        }
+        if let Err(error) = run_ip(&as_strs(&arguments.rule)) {
+            run_ip_best_effort(&arguments.delete_route);
+            return Err(error);
+        }
+        return Ok(RoutePolicy { table });
+    }
+}
+
+fn remove_route_policy(local: Ipv4Addr, name: &str, policy: &RoutePolicy) {
+    let arguments = route_policy_arguments(local, name, policy.table);
+    run_ip_best_effort(&arguments.delete_rule);
+    run_ip_best_effort(&arguments.delete_route);
+}
+
+fn run_ip_best_effort(arguments: &[String]) {
+    let status = Command::new("ip")
+        .args(arguments)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    if !status.is_ok_and(|status| status.success()) {
+        warn!(command = %format!("ip {}", arguments.join(" ")), "failed to clean up route policy");
+    }
+}
+
+fn as_strs(arguments: &[String]) -> Vec<&str> {
+    arguments.iter().map(String::as_str).collect()
+}
+
+fn current_route_tables() -> Result<BTreeSet<u32>> {
+    let routes = run_ip_capture(&["-N", "route", "show", "table", "all"])?;
+    let rules = run_ip_capture(&["-N", "rule", "show"])?;
+    Ok(configured_route_tables(&routes, &rules))
+}
+
+fn run_ip_capture(arguments: &[&str]) -> Result<String> {
+    let output = Command::new("ip").args(arguments).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(Error::NetworkConfiguration(format!(
+            "ip {} exited with {}: {}",
+            arguments.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+fn configured_route_tables(routes: &str, rules: &str) -> BTreeSet<u32> {
+    routes
+        .lines()
+        .chain(rules.lines())
+        .flat_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            fields
+                .windows(2)
+                .filter(|pair| pair[0] == "table" || pair[0] == "lookup")
+                .filter_map(|pair| pair[1].parse().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn select_route_table(used: &BTreeSet<u32>) -> Option<u32> {
+    (ROUTE_TABLE_START..ROUTE_TABLE_END).find(|table| !used.contains(table))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::tunnel_address_arguments;
+    use super::{
+        configured_route_tables, route_policy_arguments, select_route_table,
+        tunnel_address_arguments,
+    };
 
     #[test]
     fn tunnel_address_does_not_install_a_peer_route() {
@@ -177,5 +329,45 @@ mod tests {
             tunnel_address_arguments("121.126.139.11".parse().unwrap(), "haiip0"),
             ["addr", "replace", "121.126.139.11/32", "dev", "haiip0"]
         );
+    }
+
+    #[test]
+    fn route_policy_sends_only_tunnel_sourced_traffic_through_tun() {
+        let arguments = route_policy_arguments("121.126.139.11".parse().unwrap(), "haiip0", 20_001);
+
+        assert_eq!(
+            arguments.route,
+            ["route", "add", "table", "20001", "default", "dev", "haiip0",]
+        );
+        assert_eq!(
+            arguments.rule,
+            [
+                "rule",
+                "add",
+                "from",
+                "121.126.139.11/32",
+                "lookup",
+                "20001",
+            ]
+        );
+    }
+
+    #[test]
+    fn route_table_selection_skips_tables_used_by_routes_or_rules() {
+        let used = configured_route_tables(
+            "default dev other0 table 20000 scope link\n",
+            "32765: from 203.0.113.1 lookup 20001\n",
+        );
+
+        assert_eq!(select_route_table(&used), Some(20_002));
+    }
+
+    #[test]
+    fn separate_instances_get_separate_route_tables() {
+        let mut used = configured_route_tables("", "");
+        let first = select_route_table(&used).unwrap();
+        used.insert(first);
+
+        assert_ne!(select_route_table(&used), Some(first));
     }
 }
