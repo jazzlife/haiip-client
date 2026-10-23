@@ -2,8 +2,8 @@
 
 > [!IMPORTANT]
 > ```bash
-> sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>'
-> sudo ./scripts/uninstall.sh
+> sudo ./haiip setup      # 메뉴에서 설치 / 재설치 / 제거
+> haiip status            # 서비스와 터널 상태
 > ```
 
 기존 `pptp-linux`, `pppd`, NetworkManager를 실행하지 않고 PPTP/PPP를 직접 처리하는 Linux용 Rust 클라이언트입니다.
@@ -40,27 +40,68 @@ cargo run -- capture-info
 haiip about
 ```
 
-## 한 단계 설치와 삭제
+## 설치와 삭제 (메뉴)
 
-Rust stable이 설치된 Linux에서 아래 한 명령으로 빌드·환경 파일 생성·서비스 등록·시작이 끝납니다.
+`haiip setup`은 설치·재설치·제거를 메뉴로 수행합니다. 바이너리가 systemd unit을 내장하므로 소스 트리나 Rust 툴체인이 없어도 실행 파일 하나로 설치가 끝납니다.
 
 ```bash
-sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>'
+sudo ./haiip setup
 ```
 
-기본값은 `auto`이며 연결 가능한 Hai-IP 서버를 자동 선택합니다. 특정 서버를 지정하려면 다음처럼 실행합니다.
+```
+  실행 파일  /usr/local/bin/haiip (설치됨)
+  유닛       /etc/systemd/system/haiip-client.service (설치됨)
+  자격증명   /etc/haiip/client.env (설치됨)
+  서비스     active / enabled
+  터널       haiip0 121.126.139.11/32
 
-```bash
-sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>' --server hai-ip4.haion.net
+  1) 설치          자격증명을 입력하고 서비스를 구성합니다
+  2) 재설치        자격증명은 그대로 두고 실행 파일과 유닛만 교체합니다
+  3) 제거          서비스와 실행 파일을 삭제합니다
+  4) 상태 새로고침
+  5) 로그          최근 50줄을 봅니다
+  6) 재시작
+  0) 종료
+선택>
 ```
 
-삭제는 한 명령입니다.
+`1) 설치`는 서버(기본 `auto`), 사용자명(`아이디@VPN번호`), 비밀번호를 입력받아 `/etc/haiip/client.env`에 `root:root`, `0600`으로 기록하고 유닛을 등록·시작합니다. 비밀번호는 입력 중 화면에 표시되지 않고 셸 이력에도 남지 않습니다.
+
+`2) 재설치`는 업그레이드 경로입니다. 자격증명을 다시 묻지 않고 실행 파일과 유닛만 교체한 뒤 서비스를 재시작하므로, 새 릴리스를 적용할 때 비밀번호가 필요하지 않습니다. 실행 중인 바이너리는 제자리에 쓸 수 없으므로 같은 디렉터리에 받아 두고 rename으로 교체합니다.
+
+`3) 제거`는 서비스 중지·비활성화, 유닛과 실행 파일 삭제를 수행하고, 자격증명 파일 삭제 여부를 따로 확인합니다.
+
+스크립트 방식도 그대로 동작합니다. 소스 트리에서 빌드까지 한 번에 하려면 다음을 사용합니다.
 
 ```bash
+sudo ./scripts/install.sh --username '<아이디@VPN번호>' --password '<비밀번호>' [--server hai-ip4.haion.net]
 sudo ./scripts/uninstall.sh
 ```
 
-설치 스크립트는 release 빌드, 바이너리 배치, systemd unit 등록, 환경 파일 생성, 서비스 재시작을 내부에서 처리합니다. 사용자명·비밀번호·서버 선택값은 `/etc/haiip/client.env`에만 기록하고 `root:root`, `0600` 권한을 적용합니다. 이 파일은 Git 추적 대상이 아니며 저장소에 포함되지 않습니다. 제공된 unit은 환경 파일에서만 계정을 읽고, 프로세스가 모든 후보에서 실패한 경우 60초 후 다시 시도합니다.
+제공된 unit은 환경 파일에서만 계정을 읽고, 프로세스가 모든 후보에서 실패한 경우 10초 후 다시 시도합니다.
+
+## 릴리스
+
+버전은 태그로 게시됩니다. `v<버전>` 태그를 밀면 `.github/workflows/release.yml`이 fmt·clippy·테스트를 돌린 뒤 두 가지 아카이브를 만들어 GitHub 릴리스로 올립니다.
+
+| 아카이브 | 설명 |
+| --- | --- |
+| `x86_64-unknown-linux-musl` | 정적 링크. 배포판·glibc 버전과 무관하게 x86_64 Linux에서 실행 |
+| `x86_64-unknown-linux-gnu` | 동적 링크 glibc 빌드 |
+
+워크플로우는 태그와 `Cargo.toml`의 버전이 다르면 빌드를 거부하고, 릴리스된 바이너리가 `haiip <버전>`을 보고하는지, musl 빌드가 실제로 정적인지 확인합니다. 아카이브에는 실행 파일, unit, 환경 파일 예시, 설치 스크립트, `INSTALL.md`, SHA-256 체크섬이 들어 있습니다.
+
+```bash
+tar xzf haiip-v1.1.0-x86_64-unknown-linux-musl.tar.gz
+cd haiip-v1.1.0-x86_64-unknown-linux-musl
+sudo ./haiip setup
+```
+
+새 버전을 내려면 `Cargo.toml`의 버전을 올려 커밋하고 같은 버전의 태그를 밉니다.
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
 
 ## 운영과 관찰
 

@@ -11,6 +11,7 @@ use crate::{
     error::{Error, Result},
     pptp::control::{establish, ControlConnectOptions},
     session::{self, SessionOptions},
+    setup,
 };
 
 #[derive(Debug, Parser)]
@@ -60,9 +61,11 @@ pub enum Command {
         #[arg(long)]
         control_only: bool,
     },
+    /// 설치·재설치·제거를 메뉴로 수행합니다 (root 권한 필요).
+    Setup,
     /// Disconnect the managed background session (supervisor milestone).
     Disconnect,
-    /// Show the managed connection state (supervisor milestone).
+    /// Show the service and tunnel state.
     Status,
     /// Inspect local support and protocol implementation status.
     Inspect,
@@ -156,12 +159,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::About => {
             println!(
-                "Hai-IP Client — 독립형 Rust PPTP 구현\n\nPPTP 제어, Enhanced GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리합니다. 기본 auto 모드는 Hai-IP 서버 풀에서 연결 가능한 엔드포인트를 선택하며, 서비스 인증 정보는 root 전용 환경 파일에서만 읽습니다.\n\n설치  sudo ./scripts/install.sh --username <사용자명> --password <비밀번호>\n삭제  sudo ./scripts/uninstall.sh"
+                "Hai-IP Client — 독립형 Rust PPTP 구현\n\nPPTP 제어, Enhanced GRE, PPP, MS-CHAPv2, IPCP와 Linux TUN을 직접 처리합니다. 기본 auto 모드는 Hai-IP 서버 풀에서 연결 가능한 엔드포인트를 선택하며, 서비스 인증 정보는 root 전용 환경 파일에서만 읽습니다.\n\n설치·제거  sudo haiip setup  (메뉴)\n상태       haiip status\n스크립트   sudo ./scripts/install.sh --username <사용자명> --password <비밀번호>"
             );
             Ok(())
         }
+        Command::Setup => setup::menu(),
         Command::Disconnect => Err(Error::NotImplemented("disconnect supervisor")),
-        Command::Status => Err(Error::NotImplemented("status supervisor")),
+        Command::Status => {
+            setup::print_status();
+            Ok(())
+        }
         Command::RouteStatus => Err(Error::NotImplemented("route management")),
     }
 }

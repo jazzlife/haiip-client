@@ -6,4 +6,5 @@ pub mod logging;
 pub mod ppp;
 pub mod pptp;
 pub mod session;
+pub mod setup;
 pub mod tun;
