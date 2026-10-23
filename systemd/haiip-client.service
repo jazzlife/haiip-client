@@ -10,7 +10,7 @@ Environment=RUST_LOG=info
 EnvironmentFile=/etc/haiip/client.env
 ExecStart=/usr/local/bin/haiip connect --server ${HAIIP_SERVER} --username-env HAIIP_USERNAME --password-env HAIIP_PASSWORD --tun-name haiip0 --mtu 1400
 Restart=on-failure
-RestartSec=60s
+RestartSec=10s
 TimeoutStopSec=10s
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW

@@ -51,6 +51,12 @@ pub enum Command {
         tun_name: String,
         #[arg(long, default_value_t = 1400)]
         mtu: u16,
+        /// LCP Echo-Request 간격(초). 0이면 보내지 않습니다.
+        #[arg(long, default_value_t = session::DEFAULT_ECHO_INTERVAL.as_secs())]
+        echo_interval_seconds: u64,
+        /// 이 시간(초) 동안 GRE 수신이 전혀 없으면 세션을 끊고 재연결합니다. 0이면 비활성화.
+        #[arg(long, default_value_t = session::DEFAULT_PEER_TIMEOUT.as_secs())]
+        peer_timeout_seconds: u64,
         #[arg(long)]
         control_only: bool,
     },
@@ -79,6 +85,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             password_env,
             tun_name,
             mtu,
+            echo_interval_seconds,
+            peer_timeout_seconds,
             control_only,
         } => {
             let servers = selected_servers(&server);
@@ -121,6 +129,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                         password: password.clone(),
                         tun_name: tun_name.clone(),
                         mtu,
+                        echo_interval: Duration::from_secs(echo_interval_seconds),
+                        peer_timeout: Duration::from_secs(peer_timeout_seconds),
                     })
                     .await
                     {

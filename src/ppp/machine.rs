@@ -24,6 +24,7 @@ pub struct Machine {
     password: Zeroizing<String>,
     local_magic: u32,
     peer_magic: Option<u32>,
+    echo_identifier: u8,
     lcp_options: Vec<u8>,
     lcp_local_acked: bool,
     lcp_peer_acked: bool,
@@ -51,6 +52,7 @@ impl Machine {
             password: Zeroizing::new(password),
             local_magic,
             peer_magic: None,
+            echo_identifier: 0,
             lcp_options,
             lcp_local_acked: false,
             lcp_peer_acked: false,
@@ -70,6 +72,17 @@ impl Machine {
         Event::Send {
             protocol: LCP,
             payload: control_packet(1, 1, &self.lcp_options),
+        }
+    }
+
+    /// Probe a peer that has stopped talking. RFC 1661 requires an Echo-Reply
+    /// for every Echo-Request, so a run of unanswered probes is the only way to
+    /// tell a quiet link apart from one whose GRE path has silently gone away.
+    pub fn echo_request(&mut self) -> Event {
+        self.echo_identifier = self.echo_identifier.wrapping_add(1);
+        Event::Send {
+            protocol: LCP,
+            payload: control_packet(9, self.echo_identifier, &self.local_magic.to_be_bytes()),
         }
     }
 
@@ -138,7 +151,10 @@ impl Machine {
                     payload: control_packet(10, identifier, &reply_data),
                 }])
             }
-            10 => Ok(Vec::new()),
+            10 => {
+                debug!(identifier, "RX LCP Echo-Reply");
+                Ok(Vec::new())
+            }
             _ => Ok(Vec::new()),
         }
     }

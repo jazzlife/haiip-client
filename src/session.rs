@@ -1,7 +1,11 @@
-use std::{collections::BTreeMap, net::Ipv4Addr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::Ipv4Addr,
+    time::{Duration, Instant},
+};
 
 use rand::{rngs::OsRng, RngCore};
-use tokio::time::timeout;
+use tokio::time::{timeout, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -16,6 +20,14 @@ use crate::{
     tun::TunDevice,
 };
 
+/// How long the tunnel may stay silent before we probe the peer with an LCP
+/// Echo-Request.
+pub const DEFAULT_ECHO_INTERVAL: Duration = Duration::from_secs(10);
+/// How long the tunnel may stay silent before the peer counts as dead. Hai-IP
+/// echoes every five seconds, so a full minute without a single GRE packet
+/// means the path is gone, not merely idle.
+pub const DEFAULT_PEER_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct SessionOptions {
     pub server: String,
     pub port: u16,
@@ -23,6 +35,8 @@ pub struct SessionOptions {
     pub password: String,
     pub tun_name: String,
     pub mtu: u16,
+    pub echo_interval: Duration,
+    pub peer_timeout: Duration,
 }
 
 struct GreState {
@@ -159,41 +173,62 @@ pub async fn connect(options: SessionOptions) -> Result<()> {
         }
     };
 
-    let negotiated = tokio::select! {
-        result = timeout(Duration::from_secs(30), negotiation) => match result {
+    let (control_joined, negotiated) = tokio::select! {
+        result = timeout(Duration::from_secs(30), negotiation) => (false, match result {
             Ok(result) => result,
             Err(_) => Err(Error::Timeout(30)),
-        },
-        result = &mut control_task => match result {
+        }),
+        result = &mut control_task => (true, match result {
             Ok(Ok(())) => Err(Error::Ppp("PPTP control task ended unexpectedly".into())),
             Ok(Err(error)) => Err(error),
             Err(error) => Err(Error::Ppp(format!("control task failed: {error}"))),
-        },
+        }),
     };
     let (local, remote) = match negotiated {
         Ok(connected) => connected,
         Err(error) => {
-            control_task.abort();
-            let _ = control_task.await;
+            finish_control(control_task, control_joined).await;
             return Err(error);
         }
     };
     info!(%local, peer = %remote, "IPCP opened");
     let tun = TunDevice::create(&options.tun_name, local, remote, options.mtu)?;
     info!(interface = %tun.name, "Hai-IP tunnel connected");
-    let result = pump(
+    let pump = Pump {
         gre,
-        call.peer_call_id,
-        call.local_call_id,
+        peer_call_id: call.peer_call_id,
+        local_call_id: call.local_call_id,
         peer_ip,
-        gre_state,
+        state: gre_state,
         machine,
         tun,
-    )
-    .await;
-    control_task.abort();
-    let _ = control_task.await;
+        echo_interval: options.echo_interval,
+        peer_timeout: options.peer_timeout,
+    };
+    // The control connection must stay selected on for the whole session:
+    // Stop-Control-Connection-Request and Call-Disconnect-Notify arrive there,
+    // and before this the task was left unpolled once the tunnel was up.
+    let (control_joined, result) = tokio::select! {
+        result = pump.run() => (false, result),
+        result = &mut control_task => (true, match result {
+            Ok(Ok(())) => Err(Error::Ppp("PPTP control task ended unexpectedly".into())),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(Error::Ppp(format!("control task failed: {error}"))),
+        }),
+    };
+    finish_control(control_task, control_joined).await;
     result
+}
+
+/// Shut the control task down. A `JoinHandle` that has already yielded its
+/// output panics when polled again, so a task whose result was taken by a
+/// `select!` branch must not be awaited a second time.
+async fn finish_control(task: tokio::task::JoinHandle<Result<()>>, already_joined: bool) {
+    if already_joined {
+        return;
+    }
+    task.abort();
+    let _ = task.await;
 }
 
 async fn process_ppp(
@@ -253,25 +288,91 @@ async fn send_ack(gre: &GreSocket, call_id: u16, acknowledgement: u32) -> Result
         .await
 }
 
-async fn pump(
+/// What the keepalive timer should do after `silence` without a single GRE
+/// packet from the peer.
+#[derive(Debug, Eq, PartialEq)]
+enum Keepalive {
+    Quiet,
+    Probe,
+    Dead,
+}
+
+fn keepalive_action(
+    silence: Duration,
+    echo_interval: Duration,
+    peer_timeout: Duration,
+) -> Keepalive {
+    if !peer_timeout.is_zero() && silence >= peer_timeout {
+        Keepalive::Dead
+    } else if !echo_interval.is_zero() && silence >= echo_interval {
+        Keepalive::Probe
+    } else {
+        Keepalive::Quiet
+    }
+}
+
+struct Pump {
     gre: GreSocket,
     peer_call_id: u16,
     local_call_id: u16,
     peer_ip: Ipv4Addr,
-    mut state: GreState,
-    mut machine: Machine,
+    state: GreState,
+    machine: Machine,
     tun: TunDevice,
-) -> Result<()> {
-    let mut gre_buffer = vec![0_u8; 65_535];
-    let mut tun_buffer = vec![0_u8; 65_535];
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    loop {
-        tokio::select! {
+    echo_interval: Duration,
+    peer_timeout: Duration,
+}
+
+impl Pump {
+    async fn run(self) -> Result<()> {
+        let Pump {
+            gre,
+            peer_call_id,
+            local_call_id,
+            peer_ip,
+            mut state,
+            mut machine,
+            tun,
+            echo_interval,
+            peer_timeout,
+        } = self;
+        let mut gre_buffer = vec![0_u8; 65_535];
+        let mut tun_buffer = vec![0_u8; 65_535];
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+        // A zero peer timeout disables dead-peer detection outright; the timer
+        // then idles on a long period instead of complicating the select.
+        let supervised = !peer_timeout.is_zero();
+        let period = if supervised {
+            echo_interval.clamp(Duration::from_secs(1), peer_timeout)
+        } else {
+            Duration::from_secs(3600)
+        };
+        let mut keepalive = tokio::time::interval(period);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        keepalive.tick().await;
+        let mut last_rx = Instant::now();
+        if supervised {
+            info!(
+                echo_interval_seconds = period.as_secs(),
+                peer_timeout_seconds = peer_timeout.as_secs(),
+                "dead-peer detection armed"
+            );
+        } else {
+            warn!("dead-peer detection disabled; a silent peer will not be noticed");
+        }
+
+        loop {
+            tokio::select! {
             received = gre.receive(&mut gre_buffer) => {
                 let (length, source) = received?;
                 if source != peer_ip { continue; }
                 let decoded = packet::decode_ipv4(&gre_buffer[..length])?;
                 if decoded.call_id != local_call_id { continue; }
+                // Any well-formed packet for this call proves the peer is
+                // alive, acknowledgement-only frames included.
+                last_rx = Instant::now();
                 debug!(
                     phase = "pump",
                     call_id = decoded.call_id,
@@ -327,15 +428,151 @@ async fn pump(
                 gre.send(&packet).await?;
                 state.send_sequence = state.send_sequence.wrapping_add(1);
             }
+            _ = keepalive.tick() => {
+                if !supervised { continue; }
+                let silence = last_rx.elapsed();
+                match keepalive_action(silence, echo_interval, peer_timeout) {
+                    Keepalive::Quiet => {}
+                    Keepalive::Probe => {
+                        debug!(silence_seconds = silence.as_secs(), "TX LCP Echo-Request to probe a quiet peer");
+                        let probe = machine.echo_request();
+                        send_event(&gre, peer_call_id, &mut state, probe).await?;
+                    }
+                    Keepalive::Dead => {
+                        warn!(
+                            silence_seconds = silence.as_secs(),
+                            "no GRE traffic from the PPTP peer; closing the session so it can reconnect"
+                        );
+                        return Err(Error::PeerTimeout(silence.as_secs()));
+                    }
+                }
+            }
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = terminate.recv() => return Ok(()),
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GreState, ReceiveSequence};
+    use std::time::Duration;
+
+    use super::{
+        finish_control, keepalive_action, GreState, Keepalive, ReceiveSequence,
+        DEFAULT_ECHO_INTERVAL, DEFAULT_PEER_TIMEOUT,
+    };
+    use crate::error::{Error, Result};
+
+    #[tokio::test]
+    async fn a_control_task_whose_result_was_taken_is_not_joined_twice() {
+        let mut task = tokio::spawn(async { Err::<(), Error>(Error::PeerTimeout(90)) });
+        let joined = tokio::select! {
+            result = &mut task => {
+                assert!(matches!(result, Ok(Err(Error::PeerTimeout(90)))));
+                true
+            }
+        };
+        // Polling the handle again here is what paniced with
+        // "JoinHandle polled after completion" and killed the process.
+        finish_control(task, joined).await;
+    }
+
+    #[tokio::test]
+    async fn a_control_task_still_running_is_aborted_and_joined() {
+        let task = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok::<(), Error>(())
+        });
+        finish_control(task, false).await;
+    }
+
+    #[tokio::test]
+    async fn finish_control_accepts_a_task_that_returned_ok() {
+        let task = tokio::spawn(async { Ok::<(), Error>(()) });
+        let _: Result<()> = Ok(());
+        finish_control(task, false).await;
+    }
+
+    #[test]
+    fn a_peer_that_keeps_talking_is_never_probed() {
+        assert_eq!(
+            keepalive_action(
+                Duration::from_secs(5),
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Quiet
+        );
+    }
+
+    #[test]
+    fn a_quiet_peer_is_probed_before_it_is_declared_dead() {
+        assert_eq!(
+            keepalive_action(
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Probe
+        );
+        assert_eq!(
+            keepalive_action(
+                DEFAULT_PEER_TIMEOUT - Duration::from_secs(1),
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Probe
+        );
+    }
+
+    #[test]
+    fn silence_past_the_peer_timeout_is_fatal() {
+        assert_eq!(
+            keepalive_action(
+                DEFAULT_PEER_TIMEOUT,
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Dead
+        );
+        assert_eq!(
+            keepalive_action(
+                Duration::from_secs(9 * 3600),
+                DEFAULT_ECHO_INTERVAL,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Dead
+        );
+    }
+
+    #[test]
+    fn a_zero_peer_timeout_disables_dead_peer_detection() {
+        assert_eq!(
+            keepalive_action(
+                Duration::from_secs(9 * 3600),
+                DEFAULT_ECHO_INTERVAL,
+                Duration::ZERO
+            ),
+            Keepalive::Probe
+        );
+    }
+
+    #[test]
+    fn a_zero_echo_interval_still_declares_a_dead_peer() {
+        assert_eq!(
+            keepalive_action(
+                Duration::from_secs(30),
+                Duration::ZERO,
+                DEFAULT_PEER_TIMEOUT
+            ),
+            Keepalive::Quiet
+        );
+        assert_eq!(
+            keepalive_action(DEFAULT_PEER_TIMEOUT, Duration::ZERO, DEFAULT_PEER_TIMEOUT),
+            Keepalive::Dead
+        );
+    }
 
     #[test]
     fn receive_gap_advances_instead_of_stalling_the_tunnel() {

@@ -1,11 +1,14 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 use tokio::{
     io::AsyncWriteExt,
     net::{lookup_host, TcpStream},
-    time::timeout,
+    time::{timeout, MissedTickBehavior},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 
@@ -137,9 +140,20 @@ pub async fn establish_call(
     }
 }
 
+/// How often the control connection probes the peer.
+pub const CONTROL_ECHO_INTERVAL: Duration = Duration::from_secs(30);
+/// How long an Echo-Request may stay unanswered before the control connection
+/// counts as dead. Three missed probes.
+pub const CONTROL_ECHO_TIMEOUT: Duration = Duration::from_secs(90);
+
 pub async fn maintain(mut stream: TcpStream) -> Result<()> {
     let mut next_identifier = 1_u32;
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    // Oldest probe still waiting for a reply. A TCP control connection whose
+    // peer has gone away stays writable for a long time, so silence here has to
+    // be timed explicitly rather than waited on.
+    let mut outstanding: Option<(u32, Instant)> = None;
+    let mut interval = tokio::time::interval(CONTROL_ECHO_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await;
     loop {
         tokio::select! {
@@ -147,6 +161,11 @@ pub async fn maintain(mut stream: TcpStream) -> Result<()> {
                 ControlMessage::EchoRequest { identifier } => {
                     let reply = ControlMessage::EchoReply { identifier, result_code: 1, error_code: 0 };
                     stream.write_all(&encode(&reply)).await?;
+                    debug!(identifier, "TX PPTP Echo-Reply");
+                }
+                ControlMessage::EchoReply { identifier, result_code, .. } => {
+                    debug!(identifier, result_code, "RX PPTP Echo-Reply");
+                    outstanding = None;
                 }
                 ControlMessage::StopRequest { .. } => {
                     let reply = ControlMessage::StopReply { result_code: 1, error_code: 0 };
@@ -159,8 +178,18 @@ pub async fn maintain(mut stream: TcpStream) -> Result<()> {
                 _ => {}
             },
             _ = interval.tick() => {
+                if let Some((identifier, sent)) = outstanding {
+                    let silence = sent.elapsed();
+                    if silence >= CONTROL_ECHO_TIMEOUT {
+                        warn!(identifier, seconds = silence.as_secs(), "PPTP control connection stopped answering Echo-Requests");
+                        return Err(Error::PeerTimeout(silence.as_secs()));
+                    }
+                    warn!(identifier, seconds = silence.as_secs(), "PPTP Echo-Reply still outstanding");
+                }
                 let echo = ControlMessage::EchoRequest { identifier: next_identifier };
                 stream.write_all(&encode(&echo)).await?;
+                debug!(identifier = next_identifier, "TX PPTP Echo-Request");
+                outstanding.get_or_insert((next_identifier, Instant::now()));
                 next_identifier = next_identifier.wrapping_add(1);
             }
         }

@@ -10,6 +10,8 @@ pub enum Error {
     NoIpv4Address(String),
     #[error("PPTP control handshake timed out after {0} seconds")]
     Timeout(u64),
+    #[error("PPTP peer went silent for {0} seconds; tearing the session down to reconnect")]
+    PeerTimeout(u64),
     #[error("PPTP control connection rejected: result={result}, error={error}")]
     ControlRejected { result: u8, error: u8 },
     #[error("unsupported PPTP protocol version 0x{0:04x}")]
