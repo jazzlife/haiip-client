@@ -12,7 +12,14 @@ use tracing::warn;
 
 use crate::error::{Error, Result};
 
-const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+/// `ioctl` takes its request as `c_ulong` on glibc and as `c_int` on musl, so
+/// the constant has to follow the target's C library rather than pick one.
+#[cfg(target_env = "musl")]
+type IoctlRequest = libc::c_int;
+#[cfg(not(target_env = "musl"))]
+type IoctlRequest = libc::c_ulong;
+
+const TUNSETIFF: IoctlRequest = 0x4004_54ca;
 const IFF_TUN: libc::c_short = 0x0001;
 const IFF_NO_PI: libc::c_short = 0x1000;
 const ROUTE_TABLE_START: u32 = 20_000;
